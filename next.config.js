@@ -5,7 +5,7 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  // Add these lines to ignore errors during build
+  // ⚠️ These lines are required to pass the Vercel build
   eslint: {
     ignoreDuringBuilds: true,
   },
