@@ -1,73 +1,38 @@
-'use client';
 "use client";
 
-import { useState, useEffect, useRef } from 'react';
-import dynamic from 'next/dynamic';
-import JarvisCore from '@/components/JarvisCore';
-import VoiceInterface from '@/components/VoiceInterface';
-import ChatInterface from '@/components/ChatInterface';
-import DevicePanel from '@/components/DevicePanel';
-import FaceRecognition from '@/components/FaceRecognition';
-import GestureControl from '@/components/GestureControl';
-import { useJarvisStore } from '@/lib/store';
-import { jarvisAPI } from '@/lib/api';
 import { useState, useEffect, useRef } from "react";
 
-// Dynamic import for Three.js (no SSR)
-const ThreeScene = dynamic(() => import('@/components/ThreeScene'), {
-  ssr: false,
-  loading: () => <div className="w-full h-full flex items-center justify-center">Loading 3D...</div>
-});
-// Get API URL from env or default
+// API Configuration
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://mainhushivam-jarvis-api.hf.space";
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState('chat');
-  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
-  const [deferredPrompt, setDeferredPrompt] = useState(null);
-  
-  const {
-    isListening,
-    isSpeaking,
-    isProcessing,
-    messages,
-    devices,
-    sensorData,
-    faceDetected,
-    gestureDetected,
-    setStatus,
-    addMessage,
-  } = useJarvisStore();
+  // State
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [status, setStatus] = useState("connecting");
+  const [voice, setVoice] = useState("jarvis");
+  const [audioEnabled, setAudioEnabled] = useState(false); // New state for permission
+  
+  // IoT State
   const [devices, setDevices] = useState({});
-  const [sensors, setSensors] = useState({});
+  const [sensors, setSensors] = useState({ temperature: "--", humidity: "--" });
+
+  // Refs
   const chatRef = useRef(null);
   const recognitionRef = useRef(null);
+  const canvasRef = useRef(null);
+  const animationRef = useRef(null);
 
-  // PWA Install Prompt
-  // Initialize
+  // ============================================
+  // INITIALIZATION
+  // ============================================
   useEffect(() => {
-    const handler = (e) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-      setShowInstallPrompt(true);
-    };
     checkHealth();
     fetchDevices();
-
-    window.addEventListener('beforeinstallprompt', handler);
-    return () => window.removeEventListener('beforeinstallprompt', handler);
-    // Welcome message
-    setMessages([{
-      type: "jarvis",
-      text: "JARVIS Online. Systems functional. How may I assist you?",
-      timestamp: new Date().toISOString()
-    }]);
-
+    
     // Setup Speech Recognition
     if (typeof window !== "undefined") {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -76,35 +41,90 @@ export default function Home() {
         recognitionRef.current.continuous = false;
         recognitionRef.current.lang = "en-US";
         
+        recognitionRef.current.onstart = () => setIsListening(true);
         recognitionRef.current.onresult = (event) => {
           const transcript = event.results[0][0].transcript;
           setInput(transcript);
-          if (event.results[0].isFinal) {
-            sendMessage(transcript);
-            setIsListening(false);
-          }
+          if (event.results[0].isFinal) sendMessage(transcript);
         };
-        
         recognitionRef.current.onend = () => setIsListening(false);
       }
     }
+
+    // Polling
+    const interval = setInterval(fetchDevices, 5000);
+    return () => clearInterval(interval);
   }, []);
 
-  const handleInstall = async () => {
-    if (!deferredPrompt) return;
-  // Auto-scroll chat
+  // Auto-scroll
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
+
+  // ============================================
+  // AUDIO ENGINE (THE FIX)
+  // ============================================
+  
+  const enableAudio = () => {
+    setAudioEnabled(true);
+    // Play a silent sound to unlock audio context on iOS/Chrome
+    const audio = new Audio();
+    audio.play().catch(() => {});
+    addMessage("jarvis", "Audio systems initialized. I am ready.");
+  };
+
+  const playAudio = (relativePath) => {
+    if (!audioEnabled) return;
+
+    // Construct full URL
+    // Ensure no double slashes
+    const baseUrl = API_URL.replace(/\/$/, "");
+    const path = relativePath.startsWith("/") ? relativePath : `/${relativePath}`;
+    const fullUrl = `${baseUrl}${path}`;
+
+    console.log("🔊 Attempting to play:", fullUrl);
+
+    const audio = new Audio(fullUrl);
+    audio.crossOrigin = "anonymous";
+    
+    audio.onplay = () => {
+      setIsSpeaking(true);
+      startVisualizer();
+    };
+
+    audio.onended = () => {
+      setIsSpeaking(false);
+      stopVisualizer();
+    };
+
+    audio.onerror = (e) => {
+      console.error("❌ Audio Error:", e);
+      setIsSpeaking(false);
+      stopVisualizer();
+    };
+
+    audio.play().catch(error => {
+      console.error("❌ Playback failed:", error);
+      // If blocked, try to force it
+      if (error.name === 'NotAllowedError') {
+        alert("Please click the screen to enable audio output.");
+      }
+    });
+  };
+
+  // ============================================
+  // CORE FUNCTIONS
+  // ============================================
+
+  const addMessage = (type, text) => {
+    setMessages(prev => [...prev, { type, text, time: new Date().toLocaleTimeString() }]);
+  };
 
   const checkHealth = async () => {
     try {
       const res = await fetch(`${API_URL}/health`);
       if (res.ok) setStatus("online");
-      else setStatus("offline");
-    } catch {
-      setStatus("offline");
-    }
+    } catch { setStatus("offline"); }
   };
 
   const fetchDevices = async () => {
@@ -113,369 +133,213 @@ export default function Home() {
       const data = await res.json();
       setDevices(data.devices || {});
       setSensors(data.sensors || {});
-    } catch (e) {
-      console.error("Device fetch failed");
-    }
+    } catch (e) {}
   };
 
   const sendMessage = async (text = input) => {
     if (!text.trim() || isLoading) return;
-
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
+    
     const userMsg = text.trim();
     setInput("");
     setIsLoading(true);
-    
-    setMessages(prev => [...prev, { type: "user", text: userMsg }]);
+    addMessage("user", userMsg);
 
     try {
+      console.log("📤 Sending to:", `${API_URL}/api/chat`);
       const res = await fetch(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg, user_id: "web_user" })
+        body: JSON.stringify({ message: userMsg, user_id: "web_user", voice: voice })
       });
       
       const data = await res.json();
+      console.log("📥 Received:", data);
+
+      addMessage("jarvis", data.response);
       
-      setMessages(prev => [...prev, { type: "jarvis", text: data.response }]);
-      speak(data.response);
-      
+      // Try to play audio if URL exists
+      if (data.audio_url) {
+        playAudio(data.audio_url);
+      } else {
+        console.warn("⚠️ No audio_url in response");
+      }
+
       if (data.intent?.type === "device_control") fetchDevices();
       
     } catch (e) {
-      setMessages(prev => [...prev, { type: "jarvis", text: "Connection error. Please try again." }]);
+      console.error("Fetch Error:", e);
+      addMessage("jarvis", "Connection error.");
     }
-
-    if (outcome === 'accepted') {
-      console.log('JARVIS installed');
+    
     setIsLoading(false);
   };
 
-  const speak = (text) => {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      window.speechSynthesis.speak(utterance);
-    }
-  };
-
   const toggleMic = () => {
-    if (!recognitionRef.current) return alert("Voice not supported in this browser");
-
-    setDeferredPrompt(null);
-    setShowInstallPrompt(false);
-    if (isListening) {
-      recognitionRef.current.stop();
-    } else {
+    if (!recognitionRef.current) return alert("Voice input not supported");
+    if (isListening) recognitionRef.current.stop();
+    else {
+      if (!audioEnabled) enableAudio(); // Enable audio when mic is clicked
+      setInput("");
       recognitionRef.current.start();
-      setIsListening(true);
     }
   };
 
-  // Initialize
-  useEffect(() => {
-    // Check server status
-    jarvisAPI.getStatus().then((data) => {
-      if (data.status === 'online') {
-        addMessage('jarvis', 'Good day! JARVIS online and ready. All systems operational.');
-      }
-    });
-  }, []);
-  const toggleDevice = async (id, currentState) => {
-    try {
-      await fetch(`${API_URL}/api/devices/control`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ device: id, action: currentState ? "off" : "on" })
-      });
-      fetchDevices();
-    } catch (e) {
-      console.error("Control failed");
-    }
-  };
+  // ============================================
+  // VISUALIZER
+  // ============================================
+  const startVisualizer = () => {
+    if (!canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    let width = canvas.width = canvas.clientWidth;
+    let height = canvas.height = canvas.clientHeight;
 
-  return (
-    <main className="min-h-screen relative">
-      {/* Background Effects */}
-      <div className="grid-bg" />
-      <div className="scan-line" />
+    const draw = () => {
+      ctx.clearRect(0, 0, width, height);
+      const time = Date.now() / 300;
       
-      {/* Header */}
-      <header className="fixed top-0 left-0 right-0 z-50 glass">
-        <div className="container mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-jarvis-blue tracking-wider">
-              J.A.R.V.I.S
-            </h1>
-            <span className="status-badge online">
-              <span className="status-dot" />
-              ONLINE
-            </span>
-    <div className="min-h-screen bg-[#0a0a1a] text-[#00d4ff] font-sans p-4">
-      <div className="max-w-4xl mx-auto">
-        
-        {/* Header */}
-        <header className="text-center mb-8 pt-4">
-          <h1 className="text-5xl font-bold mb-2 tracking-widest text-shadow-glow">JARVIS</h1>
-          <div className="flex items-center justify-center gap-2 text-sm text-gray-400">
-            <span className={`w-2 h-2 rounded-full ${status === 'online' ? 'bg-green-500' : 'bg-red-500'} animate-pulse`}></span>
-            SYSTEM {status.toUpperCase()}
+      ctx.beginPath();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#00d4ff";
+      for (let i = 0; i < width; i++) {
+        const y = Math.sin(i * 0.02 + time) * 20 + height / 2;
+        ctx.lineTo(i, y);
+      }
+      ctx.stroke();
+      animationRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+  };
+
+  const stopVisualizer = () => {
+    cancelAnimationFrame(animationRef.current);
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext("2d");
+      ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+  };
+
+  // ============================================
+  // RENDER
+  // ============================================
+  return (
+    <div className="min-h-screen bg-[#050510] text-[#00d4ff] font-sans overflow-hidden relative">
+      
+      {/* 🛑 AUDIO PERMISSION OVERLAY */}
+      {!audioEnabled && (
+        <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center backdrop-blur-sm">
+          <div className="text-center p-8 border border-[#00d4ff] rounded-2xl bg-[#0a0a1a] shadow-[0_0_50px_rgba(0,212,255,0.3)]">
+            <h1 className="text-3xl font-bold mb-4">INITIALIZE SYSTEM</h1>
+            <p className="mb-6 text-gray-400">Audio output requires permission</p>
+            <button 
+              onClick={enableAudio}
+              className="px-8 py-3 bg-[#00d4ff] text-black font-bold rounded-full hover:bg-[#00b8e6] transition-all transform hover:scale-105"
+            >
+              ENABLE AUDIO
+            </button>
           </div>
+        </div>
+      )}
+
+      <div className="max-w-7xl mx-auto p-4 h-screen flex flex-col">
+        {/* Header */}
+        <header className="flex justify-between items-center mb-4 pb-4 border-b border-white/10">
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-tr from-blue-500 to-cyan-400 ${isSpeaking ? 'animate-pulse' : ''}`}>
+              🤖
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold tracking-widest text-white">JARVIS</h1>
+              <p className="text-[10px] text-[#00ff88] tracking-widest">ONLINE</p>
+            </div>
+          </div>
+          <select 
+            value={voice} 
+            onChange={(e) => setVoice(e.target.value)}
+            className="bg-black/40 border border-white/20 rounded px-2 py-1 text-xs"
+          >
+            <option value="jarvis">Male (Jarvis)</option>
+            <option value="friday">Female (Friday)</option>
+          </select>
         </header>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-          <nav className="flex items-center gap-2">
-            {['chat', '3d', 'devices', 'vision', 'settings'].map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`px-4 py-2 rounded-lg transition-all capitalize ${
-                  activeTab === tab
-                    ? 'bg-jarvis-blue/20 text-jarvis-blue'
-                    : 'text-white/60 hover:text-white'
-                }`}
-          {/* Main Chat */}
-          <div className="lg:col-span-2">
-            <div ref={chatRef} className="bg-black/40 border border-[#00d4ff]/30 rounded-xl h-[500px] overflow-y-auto p-4 mb-4 relative">
-              {messages.length === 0 && (
-                <div className="absolute inset-0 flex items-center justify-center text-gray-600">
-                  System Ready.
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 overflow-hidden">
+          
+          {/* Left Panel - Visualizer & Sensors */}
+          <div className="lg:col-span-3 space-y-4 hidden lg:block">
+            <div className="bg-[#0a0a1a]/50 border border-white/10 rounded-xl p-4 h-32 relative">
+              <canvas ref={canvasRef} className="w-full h-full" />
+              {!isSpeaking && <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-600">AUDIO IDLE</div>}
+            </div>
+            
+            <div className="bg-[#0a0a1a]/50 border border-white/10 rounded-xl p-4">
+              <h3 className="text-xs text-gray-500 mb-2">SENSORS</h3>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="p-2 bg-black/40 rounded text-center">
+                  <div className="text-white font-bold">{sensors.temperature}°C</div>
+                  <div className="text-[10px] text-gray-500">TEMP</div>
                 </div>
-              )}
-              
+                <div className="p-2 bg-black/40 rounded text-center">
+                  <div className="text-[#00ff88] font-bold">{sensors.humidity}%</div>
+                  <div className="text-[10px] text-gray-500">HUMIDITY</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Center - Chat */}
+          <div className="lg:col-span-6 flex flex-col bg-[#0a0a1a]/80 border border-white/10 rounded-2xl relative overflow-hidden">
+            <div ref={chatRef} className="flex-1 overflow-y-auto p-4 space-y-4">
               {messages.map((m, i) => (
-                <div key={i} className={`mb-4 p-3 rounded-lg max-w-[85%] ${m.type === 'user' ? 'ml-auto bg-[#00ff88]/10 border-l-2 border-[#00ff88]' : 'bg-[#00d4ff]/10 border-l-2 border-[#00d4ff]'}`}>
-                  <div className={`text-xs font-bold mb-1 ${m.type === 'user' ? 'text-[#00ff88]' : 'text-[#00d4ff]'}`}>
-                    {m.type === 'user' ? 'COMMAND' : 'RESPONSE'}
+                <div key={i} className={`flex ${m.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-xl p-3 ${
+                    m.type === 'user' ? 'bg-[#00d4ff]/10 border border-[#00d4ff]/30 text-white' : 'bg-white/5 border border-white/10 text-gray-300'
+                  }`}>
+                    <div className="text-[10px] opacity-50 mb-1">{m.type === 'user' ? 'COMMAND' : 'RESPONSE'}</div>
+                    <div className="text-sm">{m.text}</div>
                   </div>
-                  <div className="text-white/90">{m.text}</div>
                 </div>
               ))}
-              
-              {isLoading && <div className="text-xs text-[#00d4ff] animate-pulse">Processing...</div>}
+              {isLoading && <div className="text-xs text-[#00d4ff] animate-pulse p-4">Processing...</div>}
             </div>
 
-            <div className="flex gap-2">
+            <div className="p-4 bg-black/60 border-t border-white/10 flex gap-2">
               <button 
                 onClick={toggleMic}
-                className={`p-4 rounded-full border border-[#00d4ff] transition-all ${isListening ? 'bg-[#00ff88] text-black animate-pulse' : 'bg-transparent text-[#00d4ff]'}`}
+                className={`p-3 rounded-lg border ${isListening ? 'border-red-500 text-red-500 bg-red-500/10' : 'border-[#00d4ff] text-[#00d4ff]'}`}
               >
-                {tab === '3d' ? '3D' : tab}
                 {isListening ? '🔴' : '🎤'}
               </button>
-            ))}
-          </nav>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <div className="pt-20 pb-32 container mx-auto px-4">
-        
-        {/* Chat Tab */}
-        {activeTab === 'chat' && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* JARVIS Core */}
-            <div className="flex flex-col items-center justify-center py-8">
-              <JarvisCore 
-                isListening={isListening}
-                isSpeaking={isSpeaking}
-                isProcessing={isProcessing}
               <input 
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && sendMessage()}
                 placeholder="Enter command..."
-                className="flex-1 bg-black/50 border border-[#00d4ff]/30 rounded-full px-6 text-white focus:outline-none focus:border-[#00d4ff]"
+                className="flex-1 bg-transparent border border-white/20 rounded-lg px-4 text-white focus:border-[#00d4ff] focus:outline-none"
               />
-              <div className="mt-6">
-                <VoiceInterface />
-              </div>
-            </div>
-            
-            {/* Chat */}
-            <div className="lg:col-span-2">
-              <ChatInterface />
-              <button 
-                onClick={() => sendMessage()}
-                className="px-6 rounded-full bg-[#00d4ff] text-black font-bold hover:bg-[#00b8e6]"
-              >
-                SEND
-              </button>
+              <button onClick={() => sendMessage()} className="px-4 bg-[#00d4ff] text-black font-bold rounded-lg">SEND</button>
             </div>
           </div>
-        )}
 
-        {/* 3D Tab */}
-        {activeTab === '3d' && (
-          <div className="h-[70vh] rounded-2xl overflow-hidden glass">
-            <ThreeScene />
-          </div>
-        )}
-
-        {/* Devices Tab */}
-        {activeTab === 'devices' && (
-          <DevicePanel />
-        )}
-
-        {/* Vision Tab */}
-        {activeTab === 'vision' && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <FaceRecognition />
-            <GestureControl />
-          </div>
-        )}
-
-        {/* Settings Tab */}
-        {activeTab === 'settings' && (
-          <div className="glass p-6 rounded-2xl max-w-2xl mx-auto">
-            <h2 className="text-xl font-bold text-jarvis-blue mb-6">Settings</h2>
-          {/* Right Panel - Devices */}
-          <div className="space-y-6">
-
-            <div className="space-y-6">
-              {/* Backend URL */}
-              <div>
-                <label className="block text-sm text-white/60 mb-2">Backend URL</label>
-                <input
-                  type="text"
-                  className="w-full bg-black/30 border border-jarvis-blue/30 rounded-lg px-4 py-3 text-white"
-                  placeholder="https://your-backend.hf.space"
-                  defaultValue={process.env.NEXT_PUBLIC_BACKEND_URL}
-                />
-              </div>
-              
-              {/* Voice Settings */}
-              <div>
-                <label className="block text-sm text-white/60 mb-2">Voice</label>
-                <select className="w-full bg-black/30 border border-jarvis-blue/30 rounded-lg px-4 py-3 text-white">
-                  <option value="male">JARVIS (Male)</option>
-                  <option value="female">FRIDAY (Female)</option>
-                  <option value="british">British Male</option>
-                </select>
-            {/* Quick Actions */}
-            <div className="bg-black/40 border border-[#00d4ff]/30 rounded-xl p-4">
-              <h3 className="text-sm font-bold text-[#00d4ff] mb-3 uppercase tracking-wider">Quick Access</h3>
-              <div className="grid grid-cols-2 gap-2">
-                <button onClick={() => sendMessage("Turn on lights")} className="p-2 bg-[#00d4ff]/10 hover:bg-[#00d4ff]/20 text-xs rounded border border-[#00d4ff]/30">💡 Lights On</button>
-                <button onClick={() => sendMessage("Turn off lights")} className="p-2 bg-[#00d4ff]/10 hover:bg-[#00d4ff]/20 text-xs rounded border border-[#00d4ff]/30">🌑 Lights Off</button>
-                <button onClick={() => sendMessage("Weather report")} className="p-2 bg-[#00d4ff]/10 hover:bg-[#00d4ff]/20 text-xs rounded border border-[#00d4ff]/30">🌤️ Weather</button>
-                <button onClick={() => sendMessage("System status")} className="p-2 bg-[#00d4ff]/10 hover:bg-[#00d4ff]/20 text-xs rounded border border-[#00d4ff]/30">📊 Status</button>
-              </div>
-              
-              {/* Recognition Settings */}
-              <div className="flex items-center justify-between">
-                <span>Face Recognition</span>
-                <div className="device-toggle active" />
-              </div>
-              
-              <div className="flex items-center justify-between">
-                <span>Gesture Control</span>
-                <div className="device-toggle active" />
-              </div>
-              
-              <div className="flex items-center justify-between">
-                <span>Wake Word Detection</span>
-                <div className="device-toggle" />
-            </div>
-
-            {/* Devices List */}
-            <div className="bg-black/40 border border-[#00d4ff]/30 rounded-xl p-4">
-              <h3 className="text-sm font-bold text-[#00d4ff] mb-3 uppercase tracking-wider">Connected Devices</h3>
+          {/* Right - Devices */}
+          <div className="lg:col-span-3 overflow-y-auto">
+            <div className="bg-[#0a0a1a]/50 border border-white/10 rounded-xl p-4">
+              <h3 className="text-xs text-gray-500 mb-2">DEVICES</h3>
               <div className="space-y-2">
                 {Object.entries(devices).map(([id, dev]) => (
-                  <div key={id} className="flex justify-between items-center bg-black/30 p-2 rounded">
+                  <div key={id} className="flex justify-between items-center p-2 bg-black/40 rounded border border-white/5">
                     <span className="text-sm text-gray-300">{dev.name}</span>
-                    <button 
-                      onClick={() => toggleDevice(id, dev.state)}
-                      className={`text-xs px-2 py-1 rounded font-bold ${dev.state ? 'bg-[#00ff88] text-black' : 'bg-gray-700 text-white'}`}
-                    >
+                    <span className={`text-xs px-2 py-0.5 rounded ${dev.state ? 'bg-[#00ff88]/20 text-[#00ff88]' : 'bg-gray-800 text-gray-500'}`}>
                       {dev.state ? 'ON' : 'OFF'}
-                    </button>
+                    </span>
                   </div>
                 ))}
-                {Object.keys(devices).length === 0 && (
-                  <div className="text-xs text-gray-500 text-center py-4">No devices detected</div>
-                )}
-              </div>
-              
-              <button className="btn-primary w-full">Save Settings</button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Bottom Status Bar */}
-      <footer className="fixed bottom-0 left-0 right-0 glass">
-        <div className="container mx-auto px-4 py-3 flex items-center justify-between text-sm">
-          <div className="flex items-center gap-4">
-            <span className="text-white/60">
-              ESP32: <span className={devices.esp32_connected ? 'text-jarvis-green' : 'text-jarvis-red'}>
-                {devices.esp32_connected ? 'Connected' : 'Disconnected'}
-              </span>
-            </span>
-            <span className="text-white/60">
-              Temp: <span className="text-jarvis-blue">{sensorData.temperature}°C</span>
-            </span>
-            <span className="text-white/60">
-              Humidity: <span className="text-jarvis-blue">{sensorData.humidity}%</span>
-            </span>
-          </div>
-          
-          <div className="flex items-center gap-4">
-            {faceDetected && (
-              <span className="status-badge online">
-                <span className="status-dot" />
-                Face Detected
-              </span>
-            )}
-            {gestureDetected && (
-              <span className="status-badge processing">
-                <span className="status-dot" />
-                Gesture: {gestureDetected}
-              </span>
-            )}
-          </div>
-        </div>
-      </footer>
-            {/* Sensors */}
-            <div className="bg-black/40 border border-[#00d4ff]/30 rounded-xl p-4">
-              <h3 className="text-sm font-bold text-[#00d4ff] mb-3 uppercase tracking-wider">Environment</h3>
-              <div className="grid grid-cols-2 gap-4 text-center">
-                <div>
-                  <div className="text-2xl font-bold text-[#00ff88]">{sensors.temperature || '--'}°C</div>
-                  <div className="text-xs text-gray-500">Temperature</div>
-                </div>
-                <div>
-                  <div className="text-2xl font-bold text-[#00d4ff]">{sensors.humidity || '--'}%</div>
-                  <div className="text-xs text-gray-500">Humidity</div>
-                </div>
               </div>
             </div>
-
-      {/* Install Prompt */}
-      {showInstallPrompt && (
-        <div className="install-prompt">
-          <div className="text-3xl">🤖</div>
-          <div>
-            <div className="font-bold">Install JARVIS</div>
-            <div className="text-sm text-white/60">Add to home screen for quick access</div>
           </div>
-          <button onClick={handleInstall} className="btn-primary">
-            Install
-          </button>
-          <button 
-            onClick={() => setShowInstallPrompt(false)}
-            className="text-white/40 hover:text-white"
-          >
-            ✕
-          </button>
+
         </div>
-      )}
-    </main>
       </div>
     </div>
   );
-}
 }
