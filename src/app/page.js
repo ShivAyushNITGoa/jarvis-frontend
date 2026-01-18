@@ -6,7 +6,6 @@ import { useState, useEffect, useRef } from "react";
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://mainhushivam-jarvis-api.hf.space";
 
 export default function Home() {
-  // State Management
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -14,22 +13,16 @@ export default function Home() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [status, setStatus] = useState("connecting");
   const [voice, setVoice] = useState("jarvis");
-  const [audioEnabled, setAudioEnabled] = useState(false); // Force user interaction
+  const [audioInitialized, setAudioInitialized] = useState(false);
   
   // IoT State
   const [devices, setDevices] = useState({});
-  const [sensors, setSensors] = useState({
-    temperature: "--",
-    humidity: "--",
-    light_level: "--",
-    motion: false
-  });
+  const [sensors, setSensors] = useState({ temperature: "--", humidity: "--" });
 
-  // Refs
   const chatRef = useRef(null);
   const recognitionRef = useRef(null);
-  const audioRef = useRef(null); // Reference to the <audio> element
-  const canvasRef = useRef(null); // For visualizer
+  const audioRef = useRef(null);
+  const canvasRef = useRef(null);
   const animationRef = useRef(null);
 
   // ============================================
@@ -39,10 +32,7 @@ export default function Home() {
     checkHealth();
     fetchDevices();
     
-    // Add Welcome Message
-    addMessage("jarvis", "System online. Click 'Enable Audio' to activate voice systems.");
-
-    // Setup Speech Recognition
+    // Setup Browser Speech Recognition
     if (typeof window !== "undefined") {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
@@ -51,66 +41,118 @@ export default function Home() {
         recognitionRef.current.lang = "en-US";
         
         recognitionRef.current.onstart = () => setIsListening(true);
-        
         recognitionRef.current.onresult = (event) => {
           const transcript = event.results[0][0].transcript;
           setInput(transcript);
-          if (event.results[0].isFinal) {
-            sendMessage(transcript);
-          }
+          if (event.results[0].isFinal) sendMessage(transcript);
         };
-        
         recognitionRef.current.onend = () => setIsListening(false);
       }
     }
 
-    // Auto-refresh devices every 5s
     const interval = setInterval(fetchDevices, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      cancelAnimationFrame(animationRef.current);
+    };
   }, []);
 
-  // Auto-scroll chat
   useEffect(() => {
-    if (chatRef.current) {
-      chatRef.current.scrollTop = chatRef.current.scrollHeight;
-    }
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
 
   // ============================================
-  // AUDIO SYSTEM (CRITICAL FIX)
+  // HYBRID AUDIO ENGINE (The Fix)
   // ============================================
 
-  const enableAudio = () => {
-    // Play silent sound to unlock browser audio
+  const initializeAudio = () => {
+    // 1. Unlock AudioContext
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new AudioContext();
+    audioCtx.resume();
+
+    // 2. Prepare HTML Audio
     if (audioRef.current) {
       audioRef.current.play().catch(() => {});
-      setAudioEnabled(true);
-      addMessage("jarvis", "Audio systems active. I am listening.");
+      audioRef.current.pause();
     }
+
+    // 3. Prepare Browser TTS
+    window.speechSynthesis.cancel();
+    
+    setAudioInitialized(true);
+    addMessage("jarvis", "Audio systems active. I am listening.");
   };
 
-  const playResponseAudio = (url) => {
-    if (!audioRef.current) return;
+  const speak = (text, audioUrl) => {
+    if (!audioInitialized) return;
+
+    // Strategy A: Try Backend Audio (High Quality)
+    if (audioUrl) {
+      // Clean URL
+      const cleanBase = API_URL.replace(/\/$/, "");
+      const cleanPath = audioUrl.startsWith("/") ? audioUrl : `/${audioUrl}`;
+      const fullUrl = `${cleanBase}${cleanPath}`;
+
+      console.log("🔊 Trying Backend Audio:", fullUrl);
+
+      if (audioRef.current) {
+        audioRef.current.src = fullUrl;
+        audioRef.current.load();
+        
+        const playPromise = audioRef.current.play();
+        
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsSpeaking(true);
+              startVisualizer();
+            })
+            .catch(error => {
+              console.error("❌ Backend Audio Failed:", error);
+              // Fallback to Strategy B immediately
+              fallbackSpeak(text);
+            });
+        }
+        
+        audioRef.current.onended = () => {
+          setIsSpeaking(false);
+          stopVisualizer();
+        };
+        
+        // If file fails to load (404, CORS)
+        audioRef.current.onerror = () => {
+          console.error("❌ Audio Load Error. Switching to Fallback.");
+          fallbackSpeak(text);
+        };
+        
+        return; // Exit if audio setup was successful
+      }
+    }
+
+    // Strategy B: Browser Native TTS (Fallback)
+    fallbackSpeak(text);
+  };
+
+  const fallbackSpeak = (text) => {
+    console.log("🤖 Using Browser Fallback Voice");
+    stopVisualizer(); // Canvas visualizer doesn't work well with native TTS
     
-    // Ensure URL is absolute
-    const audioUrl = url.startsWith("http") ? url : `${API_URL}${url}`;
-    console.log("🔊 Playing audio from:", audioUrl);
-
-    audioRef.current.src = audioUrl;
-    audioRef.current.play()
-      .then(() => {
-        setIsSpeaking(true);
-        startVisualizer();
-      })
-      .catch(err => {
-        console.error("Audio playback failed:", err);
-        addMessage("system", "Error playing audio. Please ensure 'Enable Audio' was clicked.");
-      });
-
-    audioRef.current.onended = () => {
-      setIsSpeaking(false);
-      stopVisualizer();
-    };
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    
+    // Select Voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => v.name.includes("Google US English") || v.name.includes("Samantha"));
+    if (preferredVoice) utterance.voice = preferredVoice;
+    
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    
+    window.speechSynthesis.speak(utterance);
   };
 
   // ============================================
@@ -118,21 +160,14 @@ export default function Home() {
   // ============================================
 
   const addMessage = (type, text) => {
-    setMessages(prev => [...prev, {
-      type,
-      text,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    }]);
+    setMessages(prev => [...prev, { type, text, time: new Date().toLocaleTimeString() }]);
   };
 
   const checkHealth = async () => {
     try {
       const res = await fetch(`${API_URL}/health`);
       if (res.ok) setStatus("online");
-      else setStatus("offline");
-    } catch {
-      setStatus("offline");
-    }
+    } catch { setStatus("offline"); }
   };
 
   const fetchDevices = async () => {
@@ -141,9 +176,7 @@ export default function Home() {
       const data = await res.json();
       setDevices(data.devices || {});
       setSensors(data.sensors || {});
-    } catch (e) {
-      console.warn("Device sync failed");
-    }
+    } catch (e) {}
   };
 
   const sendMessage = async (text = input) => {
@@ -154,45 +187,42 @@ export default function Home() {
     setIsLoading(true);
     addMessage("user", userMsg);
 
+    // Stop any current speech
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    window.speechSynthesis.cancel();
+
     try {
       const res = await fetch(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          message: userMsg, 
-          user_id: "web_user",
-          voice: voice 
-        })
+        body: JSON.stringify({ message: userMsg, user_id: "web_user", voice: voice })
       });
       
       const data = await res.json();
       addMessage("jarvis", data.response);
       
-      // Handle Audio Response
-      if (data.audio_url) {
-        playResponseAudio(data.audio_url);
-      } else {
-        console.warn("No audio URL returned from backend");
-      }
+      // TRIGGER VOICE
+      speak(data.response, data.audio_url);
 
-      if (data.intent?.type === "device_control") {
-        fetchDevices();
-      }
+      if (data.intent?.type === "device_control") fetchDevices();
       
     } catch (e) {
       console.error(e);
-      addMessage("jarvis", "I apologize, I'm having trouble connecting to my servers.");
+      addMessage("jarvis", "Connection error.");
     }
     
     setIsLoading(false);
   };
 
   const toggleMic = () => {
-    if (!recognitionRef.current) return alert("Voice input not supported in this browser");
-    
-    if (isListening) {
-      recognitionRef.current.stop();
-    } else {
+    if (!recognitionRef.current) return alert("Browser does not support voice input");
+    if (!audioInitialized) initializeAudio();
+
+    if (isListening) recognitionRef.current.stop();
+    else {
       setInput("");
       recognitionRef.current.start();
     }
@@ -205,10 +235,8 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ device: id, action: currentState ? "off" : "on" })
       });
-      setTimeout(fetchDevices, 1000);
-    } catch (e) {
-      console.error("Control failed");
-    }
+      setTimeout(fetchDevices, 500);
+    } catch (e) {}
   };
 
   // ============================================
@@ -218,20 +246,16 @@ export default function Home() {
     if (!canvasRef.current) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    let width = canvas.width = canvas.clientWidth;
-    let height = canvas.height = canvas.clientHeight;
-
     const draw = () => {
-      ctx.clearRect(0, 0, width, height);
-      const time = Date.now() / 300;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.beginPath();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "#00d4ff";
-      for (let i = 0; i < width; i++) {
-        const y = Math.sin(i * 0.02 + time) * 20 * Math.sin(time * 0.5) + height / 2;
-        if (i === 0) ctx.moveTo(i, y);
-        else ctx.lineTo(i, y);
+      const time = Date.now() / 200;
+      for (let i = 0; i < canvas.width; i++) {
+        const y = (Math.sin(i * 0.05 + time) * 15 + canvas.height / 2);
+        ctx.lineTo(i, y);
       }
+      ctx.strokeStyle = "#00d4ff";
+      ctx.lineWidth = 2;
       ctx.stroke();
       animationRef.current = requestAnimationFrame(draw);
     };
@@ -247,192 +271,118 @@ export default function Home() {
   };
 
   // ============================================
-  // RENDER UI
+  // UI RENDER
   // ============================================
   return (
-    <div className="min-h-screen bg-[#050510] text-[#00d4ff] font-sans selection:bg-[#00d4ff] selection:text-black overflow-hidden relative">
+    <div className="min-h-screen bg-[#050510] text-[#00d4ff] font-sans overflow-hidden relative">
       
       {/* Hidden Audio Element */}
       <audio ref={audioRef} className="hidden" crossOrigin="anonymous" />
 
-      {/* Audio Permission Overlay */}
-      {!audioEnabled && (
-        <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center backdrop-blur-sm">
-          <div className="text-center p-8 border border-[#00d4ff] rounded-2xl bg-[#0a0a1a] shadow-[0_0_50px_rgba(0,212,255,0.3)] max-w-md mx-4">
-            <h1 className="text-3xl font-bold mb-4 tracking-widest text-white">SYSTEM INITIALIZATION</h1>
-            <p className="mb-8 text-gray-400">Audio output requires manual authorization.</p>
-            <button 
-              onClick={enableAudio}
-              className="px-8 py-4 bg-[#00d4ff] text-black font-bold rounded-xl hover:bg-[#00b8e6] transition-all transform hover:scale-105 shadow-[0_0_20px_#00d4ff]"
-            >
-              INITIALIZE AUDIO SYSTEMS
-            </button>
+      {/* Startup Overlay */}
+      {!audioInitialized && (
+        <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center p-4">
+          <div className="w-24 h-24 rounded-full border-4 border-[#00d4ff] flex items-center justify-center animate-pulse mb-8">
+            <span className="text-4xl">🤖</span>
           </div>
+          <h1 className="text-3xl font-bold mb-2 tracking-widest text-white">JARVIS SYSTEM</h1>
+          <p className="mb-8 text-gray-400">Security protocols require authorization</p>
+          <button 
+            onClick={initializeAudio}
+            className="px-10 py-4 bg-[#00d4ff] text-black font-bold rounded-full hover:bg-[#00b8e6] transition-all shadow-[0_0_30px_rgba(0,212,255,0.4)]"
+          >
+            INITIALIZE SYSTEMS
+          </button>
         </div>
       )}
 
-      <div className="max-w-7xl mx-auto p-4 md:p-6 h-screen flex flex-col">
-        
+      <div className="max-w-7xl mx-auto p-4 h-screen flex flex-col">
         {/* Header */}
-        <header className="flex flex-col md:flex-row justify-between items-center mb-6 pb-4 border-b border-white/5">
-          <div className="flex items-center gap-4">
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center bg-gradient-to-tr from-[#00d4ff] to-[#0066ff] shadow-[0_0_20px_rgba(0,212,255,0.4)] transition-all ${isSpeaking ? 'scale-110 shadow-[0_0_40px_#00d4ff]' : ''}`}>
-              <span className="text-2xl">🤖</span>
+        <header className="flex justify-between items-center mb-4 pb-4 border-b border-white/10">
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-full bg-gradient-to-tr from-[#00d4ff] to-blue-600 flex items-center justify-center ${isSpeaking ? 'animate-pulse shadow-[0_0_20px_#00d4ff]' : ''}`}>
+              🤖
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-[0.2em] text-transparent bg-clip-text bg-gradient-to-r from-[#00d4ff] to-white">
-                JARVIS
-              </h1>
-              <p className="text-[10px] text-[#00ff88] tracking-widest font-mono">
-                STATUS: {status.toUpperCase()}
-              </p>
+              <h1 className="text-xl font-bold tracking-widest text-white">JARVIS</h1>
+              <p className="text-[10px] text-[#00ff88]">ONLINE</p>
             </div>
           </div>
-          
-          <div className="flex gap-4 mt-4 md:mt-0">
-            <select 
-              value={voice}
-              onChange={(e) => setVoice(e.target.value)}
-              className="bg-black/40 border border-white/10 rounded-full px-4 py-2 text-xs text-gray-300 outline-none focus:border-[#00d4ff] cursor-pointer"
-            >
-              <option value="jarvis">JARVIS (Male)</option>
-              <option value="friday">FRIDAY (Female)</option>
-              <option value="british">British</option>
-              <option value="indian">Indian</option>
+          <div className="flex gap-2">
+            <select value={voice} onChange={e => setVoice(e.target.value)} className="bg-white/10 rounded px-2 py-1 text-xs outline-none">
+              <option value="jarvis">JARVIS</option>
+              <option value="friday">FRIDAY</option>
             </select>
           </div>
         </header>
 
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6 overflow-hidden">
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 overflow-hidden">
           
-          {/* LEFT: Sensors & Visualizer */}
-          <div className="lg:col-span-3 space-y-4 overflow-y-auto hidden lg:block">
-            
-            {/* Visualizer */}
-            <div className="bg-[#0a0a1a]/60 backdrop-blur border border-white/10 rounded-2xl p-4 shadow-xl h-32 flex flex-col relative overflow-hidden">
-              <span className="text-[10px] text-gray-500 uppercase tracking-widest mb-2">Voice Synthesis</span>
-              <canvas ref={canvasRef} className="w-full h-full" />
-              {!isSpeaking && <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-700 font-mono">Waiting for input...</div>}
+          {/* Left Panel */}
+          <div className="lg:col-span-3 hidden lg:block space-y-4">
+            <div className="bg-white/5 rounded-xl p-4 h-32 relative border border-white/10">
+              <canvas ref={canvasRef} className="w-full h-full" width={300} height={100} />
+              {!isSpeaking && <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-600">AUDIO IDLE</div>}
             </div>
-
-            {/* Sensor Grid */}
-            <div className="bg-[#0a0a1a]/60 backdrop-blur border border-white/10 rounded-2xl p-5 shadow-xl">
-              <h3 className="text-xs font-bold text-gray-400 mb-4 uppercase tracking-widest flex items-center gap-2">
-                <span className="w-1 h-3 bg-[#00d4ff]"></span> Telemetry
-              </h3>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-black/40 p-3 rounded-xl border border-white/5">
-                  <div className="text-xl font-bold text-white">{sensors.temperature}°C</div>
+            <div className="bg-white/5 rounded-xl p-4 border border-white/10">
+              <h3 className="text-xs text-gray-500 mb-2">TELEMETRY</h3>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="text-center p-2 bg-black/20 rounded">
+                  <div className="text-white font-bold">{sensors.temperature}°C</div>
                   <div className="text-[10px] text-gray-500">TEMP</div>
                 </div>
-                <div className="bg-black/40 p-3 rounded-xl border border-white/5">
-                  <div className="text-xl font-bold text-[#00d4ff]">{sensors.humidity}%</div>
-                  <div className="text-[10px] text-gray-500">HUMIDITY</div>
-                </div>
-                <div className="bg-black/40 p-3 rounded-xl border border-white/5">
-                  <div className="text-xl font-bold text-[#ffaa00]">{sensors.light_level}</div>
-                  <div className="text-[10px] text-gray-500">LIGHT</div>
-                </div>
-                <div className="bg-black/40 p-3 rounded-xl border border-white/5">
-                  <div className={`text-xl font-bold ${sensors.motion ? 'text-red-500 animate-pulse' : 'text-[#00ff88]'}`}>
-                    {sensors.motion ? 'ALERT' : 'SECURE'}
-                  </div>
-                  <div className="text-[10px] text-gray-500">MOTION</div>
+                <div className="text-center p-2 bg-black/20 rounded">
+                  <div className="text-[#00d4ff] font-bold">{sensors.humidity}%</div>
+                  <div className="text-[10px] text-gray-500">HUM</div>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* CENTER: Main Chat */}
-          <div className="lg:col-span-6 flex flex-col bg-[#0a0a1a]/80 backdrop-blur-md border border-white/10 rounded-3xl shadow-2xl relative overflow-hidden">
-            
-            <div ref={chatRef} className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar scroll-smooth">
-              {messages.length === 0 && (
-                <div className="h-full flex flex-col items-center justify-center opacity-30">
-                  <div className="w-24 h-24 border-2 border-[#00d4ff] rounded-full flex items-center justify-center animate-spin">
-                    <div className="w-16 h-16 border-2 border-[#00d4ff] rounded-full border-t-transparent animate-spin"></div>
-                  </div>
-                  <p className="mt-4 font-mono text-sm tracking-widest text-[#00d4ff]">INITIALIZING AI CORE...</p>
-                </div>
-              )}
-              
+          {/* Center Chat */}
+          <div className="lg:col-span-6 flex flex-col bg-white/5 rounded-2xl border border-white/10 relative overflow-hidden">
+            <div ref={chatRef} className="flex-1 overflow-y-auto p-4 space-y-4">
               {messages.map((m, i) => (
-                <div key={i} className={`flex flex-col ${m.type === 'user' ? 'items-end' : 'items-start'} animate-in slide-in-from-bottom-2`}>
-                  <div className={`max-w-[85%] rounded-2xl p-4 border shadow-lg backdrop-blur-sm ${
-                    m.type === 'user' 
-                      ? 'bg-[#00d4ff]/10 border-[#00d4ff]/30 text-white rounded-tr-none' 
-                      : 'bg-white/5 border-white/10 text-gray-200 rounded-tl-none'
-                  }`}>
-                    <div className="text-[10px] uppercase tracking-wider opacity-50 mb-1 flex justify-between gap-4 font-mono">
-                      <span>{m.type === 'user' ? 'USER COMMAND' : 'AI RESPONSE'}</span>
-                      <span>{m.time}</span>
-                    </div>
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap">{m.text}</div>
+                <div key={i} className={`flex ${m.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-xl p-3 text-sm ${m.type === 'user' ? 'bg-[#00d4ff]/20 text-white' : 'bg-black/40 text-gray-300'}`}>
+                    {m.text}
                   </div>
                 </div>
               ))}
-              
-              {isLoading && (
-                <div className="flex items-center gap-2 text-[#00d4ff] text-xs p-2 animate-pulse font-mono">
-                  <span className="w-2 h-2 bg-[#00d4ff] rounded-full"></span>
-                  PROCESSING REQUEST...
-                </div>
-              )}
+              {isLoading && <div className="text-xs text-[#00d4ff] animate-pulse">Processing...</div>}
             </div>
-
-            <div className="p-4 bg-black/60 border-t border-white/10 backdrop-blur-md">
-              <div className="flex gap-3">
-                <button 
-                  onClick={toggleMic}
-                  className={`p-4 rounded-xl border transition-all duration-300 ${
-                    isListening 
-                      ? 'bg-red-500/20 border-red-500 text-red-500 shadow-[0_0_15px_rgba(255,0,0,0.3)] animate-pulse' 
-                      : 'bg-black/40 border-[#00d4ff]/30 text-[#00d4ff] hover:bg-[#00d4ff]/10'
-                  }`}
-                >
-                  {isListening ? '🔴' : '🎤'}
-                </button>
-                
-                <input 
-                  value={input}
-                  onChange={e => setInput(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && sendMessage()}
-                  placeholder={isListening ? "Listening..." : "Enter command..."}
-                  className="flex-1 bg-black/40 border border-[#00d4ff]/30 rounded-xl px-6 text-white placeholder-gray-600 focus:outline-none focus:border-[#00d4ff] focus:bg-black/60 transition-all font-mono text-sm"
-                />
-                
-                <button 
-                  onClick={() => sendMessage()}
-                  disabled={!input.trim() || isLoading}
-                  className="px-6 rounded-xl bg-[#00d4ff] text-black font-bold hover:bg-[#00b8e6] disabled:opacity-50 transition-all shadow-[0_0_15px_rgba(0,212,255,0.3)]"
-                >
-                  SEND
-                </button>
-              </div>
+            
+            <div className="p-4 bg-black/40 flex gap-2">
+              <button onClick={toggleMic} className={`p-3 rounded-lg border ${isListening ? 'border-red-500 text-red-500' : 'border-[#00d4ff] text-[#00d4ff]'}`}>
+                {isListening ? '🔴' : '🎤'}
+              </button>
+              <input 
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendMessage()}
+                placeholder="Command..."
+                className="flex-1 bg-transparent border border-white/20 rounded-lg px-4 text-white focus:border-[#00d4ff] outline-none"
+              />
+              <button onClick={() => sendMessage()} className="px-4 bg-[#00d4ff] text-black font-bold rounded-lg">SEND</button>
             </div>
           </div>
 
-          {/* RIGHT: Device Control */}
-          <div className="lg:col-span-3 space-y-4 overflow-y-auto custom-scrollbar">
-            <div className="bg-[#0a0a1a]/60 backdrop-blur border border-white/10 rounded-2xl p-5 shadow-xl">
-              <h3 className="text-xs font-bold text-gray-400 mb-4 uppercase tracking-widest flex items-center gap-2">
-                <span className="w-1 h-3 bg-[#00ff88]"></span> Devices
-              </h3>
-              <div className="space-y-3">
+          {/* Right Panel */}
+          <div className="lg:col-span-3 space-y-4">
+            <div className="bg-white/5 rounded-xl p-4 border border-white/10">
+              <h3 className="text-xs text-gray-500 mb-2">DEVICES</h3>
+              <div className="space-y-2">
                 {Object.entries(devices).map(([id, dev]) => (
-                  <div key={id} className="flex justify-between items-center bg-black/40 p-3 rounded-lg border border-white/5 hover:border-[#00d4ff]/30 transition-all">
-                    <span className="text-sm font-medium text-white">{dev.name}</span>
+                  <div key={id} className="flex justify-between items-center p-2 bg-black/20 rounded">
+                    <span className="text-sm text-gray-300">{dev.name}</span>
                     <button 
                       onClick={() => toggleDevice(id, dev.state)}
-                      className={`relative w-12 h-6 rounded-full transition-colors duration-300 ${dev.state ? 'bg-[#00ff88]/20' : 'bg-gray-800'}`}
+                      className={`text-xs px-2 py-1 rounded ${dev.state ? 'bg-[#00ff88]/20 text-[#00ff88]' : 'bg-gray-700 text-gray-400'}`}
                     >
-                      <span className={`absolute top-1 left-1 w-4 h-4 rounded-full transition-transform duration-300 transform ${dev.state ? 'translate-x-6 bg-[#00ff88] shadow-[0_0_8px_#00ff88]' : 'translate-x-0 bg-gray-500'}`} />
+                      {dev.state ? 'ON' : 'OFF'}
                     </button>
                   </div>
                 ))}
-                {Object.keys(devices).length === 0 && (
-                  <div className="text-center text-gray-600 text-xs py-8">Scanning for devices...</div>
-                )}
               </div>
             </div>
           </div>
